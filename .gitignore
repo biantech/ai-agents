@@ -219,3 +219,6 @@ __marimo__/
 
 # cache
 **/cache/
+# output 
+**/output/
+/output/
