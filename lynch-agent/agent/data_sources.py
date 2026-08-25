@@ -14,7 +14,9 @@ with the non-selected interface used as an automatic fallback.
 """
 from __future__ import annotations
 
+import csv
 import hashlib
+import logging
 import os
 import pickle
 import time
@@ -27,6 +29,8 @@ import pandas as pd
 from . import config
 
 warnings.filterwarnings("ignore")
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -99,41 +103,124 @@ def _fetch(key: str, fn: Callable[[], pd.DataFrame]) -> Optional[pd.DataFrame]:
             last_url = _extract_url(e)
         time.sleep(config.RETRY_BACKOFF * attempt)
     url_info = last_url or "<url unavailable>"
-    print(f"    [warn] {key} failed after {config.MAX_RETRY} tries: {last_err}")
-    print(f"           url: {url_info}")
+    log.warning(
+        "%s failed after %d tries: %s; url: %s",
+        key, config.MAX_RETRY, last_err, url_info,
+    )
     return None
 
 
 # ---------------------------------------------------------------------------
 # Public data accessors
 # ---------------------------------------------------------------------------
-def get_stock_list() -> list[str]:
-    """Collect 6-digit codes from every text file under LIST_DIR.
+def _unique_stocks(rows) -> list[tuple[str, str]]:
+    """Return unique code/name pairs while preserving their input order."""
+    stocks: list[tuple[str, str]] = []
+    indexes: dict[str, int] = {}
+    for code_value, name_value in rows:
+        code = str(code_value).strip()
+        if len(code) != 6 or not code.isdigit():
+            continue
+        name = str(name_value).strip()
+        if name.lower() in ("nan", "none"):
+            name = ""
+        if code not in indexes:
+            indexes[code] = len(stocks)
+            stocks.append((code, name))
+        elif name and not stocks[indexes[code]][1]:
+            stocks[indexes[code]] = (code, name)
+    return stocks
 
-    Walks all files in the list directory, extracts lines that are exactly a
-    6-digit code (BOM headers / category titles are skipped), and de-duplicates
-    while preserving first-seen order. This removes the need to manually merge or
-    rename source files into a single out.txt.
-    """
-    codes: list[str] = []
-    seen: set[str] = set()
+
+def _stocks_from(path: str) -> list[tuple[str, str]]:
+    """Read stock codes and available names from one supported list file."""
+    extension = os.path.splitext(path)[1].lower()
+    try:
+        if extension == ".csv":
+            with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+                rows = csv.reader(handle)
+                return _unique_stocks(
+                    (row[4], row[5] if len(row) > 5 else "")
+                    for row in rows if len(row) >= 5
+                )
+        if extension == ".xls":
+            frame = pd.read_excel(path, usecols=[4, 5], header=None, dtype=str)
+            return _unique_stocks(frame.itertuples(index=False, name=None))
+        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            rows = csv.reader(handle)
+            return _unique_stocks(
+                (row[0], row[1] if len(row) > 1 else "")
+                for row in rows if row
+            )
+    except Exception as exc:  # noqa: BLE001 - skip malformed list files
+        log.warning("Unable to read list file %s: %s", path, exc)
+        return []
+
+
+def _codes_from(path: str) -> list[str]:
+    """Read only stock codes from one supported list file."""
+    return [code for code, _ in _stocks_from(path)]
+
+
+def _resolve_list_path(name: str) -> Optional[str]:
+    """Resolve a filename or list-relative path without leaving LIST_DIR."""
+    list_dir = os.path.realpath(config.LIST_DIR)
+    if os.path.isabs(name):
+        path = os.path.realpath(name)
+    elif os.path.basename(name) == name:
+        path = os.path.realpath(os.path.join(list_dir, name))
+    else:
+        path = os.path.realpath(os.path.join(config.BASE_DIR, name))
+    try:
+        if os.path.commonpath((list_dir, path)) != list_dir:
+            return None
+    except ValueError:
+        return None
+    return path
+
+
+def get_codes_from_file(name: str) -> list[str]:
+    """Read codes from one file in LIST_DIR, accepting name or list/name."""
+    return [code for code, _ in get_stocks_from_file(name)]
+
+
+def get_stocks_from_file(name: str) -> list[tuple[str, str]]:
+    """Read code/name pairs from one file in LIST_DIR."""
+    path = _resolve_list_path(name)
+    if path is None or path.lower().endswith(".py") or not os.path.isfile(path):
+        return []
+    return _stocks_from(path)
+
+
+def get_stock_entries() -> list[tuple[str, str]]:
+    """Collect unique code/name pairs from all supported list files."""
+    stocks: list[tuple[str, str]] = []
+    indexes: dict[str, int] = {}
+    for _, file_stocks in get_stocks_by_file():
+        for code, name in file_stocks:
+            if code not in indexes:
+                indexes[code] = len(stocks)
+                stocks.append((code, name))
+            elif name and not stocks[indexes[code]][1]:
+                stocks[indexes[code]] = (code, name)
+    return stocks
+
+
+def get_stock_list() -> list[str]:
+    """Collect unique six-digit codes from all supported files in LIST_DIR."""
+    return [code for code, _ in get_stock_entries()]
+
+
+def get_stocks_by_file() -> list[tuple[str, list[tuple[str, str]]]]:
+    """Collect code/name pairs grouped by their source file."""
+    groups: list[tuple[str, list[tuple[str, str]]]] = []
     if not os.path.isdir(config.LIST_DIR):
-        return codes
+        return groups
     for name in sorted(os.listdir(config.LIST_DIR)):
-        path = os.path.join(config.LIST_DIR, name)
-        if not os.path.isfile(path):
-            continue
-        try:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                for line in f:
-                    s = line.strip()
-                    if len(s) == 6 and s.isdigit() and s not in seen:
-                        seen.add(s)
-                        codes.append(s)
-        except (OSError, UnicodeDecodeError):
-            # Skip unreadable / non-text files gracefully.
-            continue
-    return codes
+        if stocks := get_stocks_from_file(name):
+            stem = os.path.splitext(name)[0]
+            groups.append((stem, stocks))
+    return groups
 
 
 def get_codes_by_file() -> list[tuple[str, list[str]]]:
@@ -144,29 +231,10 @@ def get_codes_by_file() -> list[tuple[str, list[str]]]:
     preserved) but NOT across files, so callers can produce isolated per-file
     reports. The stem (name without extension) is intended as an output prefix.
     """
-    groups: list[tuple[str, list[str]]] = []
-    if not os.path.isdir(config.LIST_DIR):
-        return groups
-    for name in sorted(os.listdir(config.LIST_DIR)):
-        path = os.path.join(config.LIST_DIR, name)
-        if not os.path.isfile(path):
-            continue
-        codes: list[str] = []
-        seen: set[str] = set()
-        try:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                for line in f:
-                    s = line.strip()
-                    if len(s) == 6 and s.isdigit() and s not in seen:
-                        seen.add(s)
-                        codes.append(s)
-        except (OSError, UnicodeDecodeError):
-            # Skip unreadable / non-text files gracefully.
-            continue
-        if codes:
-            stem = os.path.splitext(name)[0]
-            groups.append((stem, codes))
-    return groups
+    return [
+        (stem, [code for code, _ in stocks])
+        for stem, stocks in get_stocks_by_file()
+    ]
 
 
 def get_name_map() -> dict:

@@ -4,14 +4,32 @@
 
 ## 使用
 
-1. 将 6 位股票代码按行放入 `list/*.txt`。
+1. 将 6 位股票代码按行放入 `list/*.txt`；`list/*.csv` 和 `list/*.xls` 从第 5 列读取代码，`list/*.py` 不参与分析。
 2. 运行 `python3 run_analysis.py`，每个列表文件独立生成报告。
-3. 运行 `python3 run_analysis.py 3` 分析合并股票池的前 3 只。
-4. 运行 `python3 run_analysis.py --top 20` 生成 Top 20 候选，也可使用 `--top 30`。
-5. 运行 `python3 run_analysis.py 50 --top 20` 分析前 50 只股票并输出 Top 20。
-6. 运行 `python3 run_analysis.py --test` 执行离线单元测试。
+3. 运行 `python3 run_analysis.py --file 2000cons.xls` 或 `python3 run_analysis.py --file list/2000cons.xls`，仅分析指定文件。
+4. 运行 `python3 run_analysis.py 3` 分析合并股票池的前 3 只。
+5. 运行 `python3 run_analysis.py --top 20` 生成 Top 20 候选，也可使用 `--top 30`。
+6. 运行 `python3 run_analysis.py 50 --top 20` 分析前 50 只股票并输出 Top 20。
+7. 长列表分析支持自动断点续跑。进程中断后，重新运行相同命令即可跳过已完成股票。
+8. 如需丢弃进度并从头分析，增加 `--restart`，例如 `python3 run_analysis.py --file 2000cons.xls --restart`。
+9. 运行 `python3 run_analysis.py --test` 执行离线单元测试。
 
-Python 依赖：`akshare`、`pandas`、`numpy`。
+断点记录保存在 `cache/` 目录，每只股票成功完成后立即更新。只有 CSV 和 Markdown 报告全部生成成功后，断点记录才会删除；失败股票不会被标记为完成，下一次运行会重试。
+
+删除文件时请注意：
+
+- 删除 `cache/analysis_*.checkpoint.pkl` 会清除该任务的分析进度，下次运行将从头分析。
+- 删除 `cache/analysis_*.checkpoint.pkl.tmp` 通常不会影响续跑，它只是原子写入时的临时文件。
+- 删除 `cache/` 中其他接口缓存只会导致数据重新请求，不会清除分析进度。
+- 删除 `output/` 下的报告不会清除检查点，下次运行会继续分析并重新生成报告。
+
+如需彻底重新开始，推荐使用 `--restart`，例如：
+
+```bash
+python3 run_analysis.py --file 2000cons.xls --restart
+```
+
+Python 依赖：`akshare`、`pandas`、`numpy`、`xlrd`。
 
 ## Top N 设置
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import pickle
 import time
 
 import pandas as pd
@@ -9,6 +11,41 @@ import pandas as pd
 from . import config, data_sources as ds, metrics
 
 log = logging.getLogger(__name__)
+
+
+def _load_checkpoint(path: str, codes: list[str]) -> dict[str, dict]:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "rb") as handle:
+            records = pickle.load(handle)
+        if not isinstance(records, list):
+            raise ValueError("checkpoint must contain a record list")
+        allowed = set(codes)
+        return {
+            record["code"]: record
+            for record in records
+            if isinstance(record, dict) and record.get("code") in allowed
+        }
+    except Exception as exc:
+        log.warning("Checkpoint load failed, starting fresh: path=%s error=%s", path, exc)
+        return {}
+
+
+def _save_checkpoint(path: str, records: list[dict]) -> None:
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    temporary_path = f"{path}.tmp"
+    with open(temporary_path, "wb") as handle:
+        pickle.dump(records, handle)
+    os.replace(temporary_path, path)
+
+
+def clear_checkpoint(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
 
 
 def _recent_close(code: str):
@@ -39,16 +76,30 @@ def analyze_one(code: str, name: str = "", industry_fallback: str = "") -> dict:
     return record
 
 
-def analyze_all(codes: list[str], verbose: bool = True) -> pd.DataFrame:
+def analyze_all(codes: list[str], verbose: bool = True,
+                checkpoint_path: str | None = None) -> pd.DataFrame:
+    completed = (_load_checkpoint(checkpoint_path, codes) if checkpoint_path else {})
+    if completed:
+        log.info("Resuming analysis: completed=%d remaining=%d",
+                 len(completed), len(codes) - len(completed))
     names, industries = ds.get_name_map(), ds.get_industry_map()
     records = []
     for index, code in enumerate(codes, 1):
+        if code in completed:
+            records.append(completed[code])
+            continue
         if verbose:
             log.info(
                 "Analyzing stock: progress=%d/%d code=%s name=%s",
                 index, len(codes), code, names.get(code, ""))
         try:
-            records.append(analyze_one(code, names.get(code, ""), industries.get(code, "")))
+            record = analyze_one(code, names.get(code, ""), industries.get(code, ""))
+            records.append(record)
+            completed[code] = record
+            if checkpoint_path:
+                _save_checkpoint(
+                    checkpoint_path,
+                    [completed[item] for item in codes if item in completed])
         except Exception:
             log.exception("Stock analysis failed: code=%s", code)
             records.append({"code": code, "name": names.get(code, ""),

@@ -1,6 +1,7 @@
 """AKShare data access with retry and a one-day disk cache."""
 from __future__ import annotations
 
+import csv
 import hashlib
 import logging
 import os
@@ -59,18 +60,44 @@ def _fetch(key: str, fn: Callable[[], pd.DataFrame]) -> Optional[pd.DataFrame]:
     return None
 
 
-def _codes_from(path: str) -> list[str]:
+def _unique_codes(values) -> list[str]:
     codes, seen = [], set()
-    try:
-        with open(path, "r", encoding="utf-8-sig") as handle:
-            for line in handle:
-                code = line.strip()
-                if len(code) == 6 and code.isdigit() and code not in seen:
-                    seen.add(code)
-                    codes.append(code)
-    except (OSError, UnicodeDecodeError):
-        pass
+    for value in values:
+        code = str(value).strip()
+        if len(code) == 6 and code.isdigit() and code not in seen:
+            seen.add(code)
+            codes.append(code)
     return codes
+
+
+def _codes_from(path: str) -> list[str]:
+    extension = os.path.splitext(path)[1].lower()
+    try:
+        if extension == ".csv":
+            with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+                return _unique_codes(row[4] for row in csv.reader(handle) if len(row) >= 5)
+        if extension == ".xls":
+            frame = pd.read_excel(path, usecols=[4], header=None, dtype=str)
+            return _unique_codes(frame.iloc[:, 0])
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            return _unique_codes(handle)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return []
+
+
+def get_codes_from_file(name: str) -> list[str]:
+    list_dir = os.path.realpath(config.LIST_DIR)
+    path = (os.path.realpath(os.path.join(list_dir, name))
+            if os.path.basename(name) == name
+            else os.path.realpath(name))
+    try:
+        if os.path.commonpath((list_dir, path)) != list_dir:
+            return []
+    except ValueError:
+        return []
+    if path.lower().endswith(".py") or not os.path.isfile(path):
+        return []
+    return _codes_from(path)
 
 
 def get_codes_by_file() -> list[tuple[str, list[str]]]:
@@ -78,8 +105,7 @@ def get_codes_by_file() -> list[tuple[str, list[str]]]:
     if not os.path.isdir(config.LIST_DIR):
         return groups
     for name in sorted(os.listdir(config.LIST_DIR)):
-        path = os.path.join(config.LIST_DIR, name)
-        if os.path.isfile(path) and (codes := _codes_from(path)):
+        if codes := get_codes_from_file(name):
             groups.append((os.path.splitext(name)[0], codes))
     return groups
 

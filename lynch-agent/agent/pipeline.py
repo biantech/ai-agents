@@ -2,12 +2,58 @@
 """Seven-step pipeline orchestration for a single stock and the full batch."""
 from __future__ import annotations
 
+import logging
+import os
+import pickle
 import time
 from datetime import datetime, timedelta
 
 import pandas as pd
 
 from . import config, data_sources as ds, lynch, metrics
+
+log = logging.getLogger(__name__)
+
+
+def _load_checkpoint(path: str, codes: list[str]) -> dict[str, dict]:
+    """Load completed records that belong to the current analysis."""
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "rb") as handle:
+            records = pickle.load(handle)
+        if not isinstance(records, list):
+            raise ValueError("checkpoint must contain a record list")
+        allowed = set(codes)
+        return {
+            record["code"]: record
+            for record in records
+            if isinstance(record, dict) and record.get("code") in allowed
+        }
+    except Exception as exc:  # noqa: BLE001 - a damaged checkpoint is recoverable
+        log.warning(
+            "Checkpoint load failed, starting fresh: path=%s error=%s",
+            path, exc,
+        )
+        return {}
+
+
+def _save_checkpoint(path: str, records: list[dict]) -> None:
+    """Atomically persist completed records after each stock."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    temporary_path = f"{path}.tmp"
+    with open(temporary_path, "wb") as handle:
+        pickle.dump(records, handle)
+    os.replace(temporary_path, path)
+
+
+def clear_checkpoint(path: str) -> None:
+    """Remove saved analysis progress when it is no longer needed."""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
 
 
 def _recent_close(code: str):
@@ -87,24 +133,52 @@ def analyze_one(code: str, name: str = "", industry_fallback: str = "") -> dict:
     return rec
 
 
-def analyze_all(codes: list[str], verbose: bool = True) -> pd.DataFrame:
-    """Batch process all stocks with polite throttling."""
+def analyze_all(codes: list[str], verbose: bool = True,
+                provided_names: dict[str, str] | None = None,
+                checkpoint_path: str | None = None) -> pd.DataFrame:
+    """Batch process all stocks and resume completed records when available."""
+    completed = (_load_checkpoint(checkpoint_path, codes) if checkpoint_path else {})
+    if completed:
+        log.info(
+            "Resuming analysis: completed=%d remaining=%d",
+            len(completed), len(codes) - len(completed),
+        )
     records = []
     total = len(codes)
-    # One batch lookup for code -> name mapping (Step 1 enrichment).
-    name_map = ds.get_name_map()
+    name_map = dict(provided_names or {})
+    for code, record in completed.items():
+        if record.get("name") and not name_map.get(code):
+            name_map[code] = record["name"]
+    remaining_codes = [code for code in codes if code not in completed]
+    if any(not name_map.get(code) for code in remaining_codes):
+        fetched_names = ds.get_name_map()
+        for code in remaining_codes:
+            if not name_map.get(code):
+                name_map[code] = fetched_names.get(code, "")
     # One batch lookup for code -> industry fallback (Shenzhen coverage only).
-    industry_map = ds.get_industry_map()
+    industry_map = ds.get_industry_map() if remaining_codes else {}
     for i, code in enumerate(codes, 1):
+        if code in completed:
+            records.append(completed[code])
+            continue
         name = name_map.get(code, "")
         industry_fallback = industry_map.get(code, "")
         if verbose:
-            print(f"[{i}/{total}] analyzing {code} {name} ...")
+            log.info("[%d/%d] analyzing %s %s", i, total, code, name)
         try:
-            records.append(analyze_one(code, name, industry_fallback))
+            record = analyze_one(code, name, industry_fallback)
         except Exception as e:  # noqa: BLE001 - keep batch alive
-            print(f"    [error] {code}: {repr(e)[:150]}")
+            log.error("Analysis failed for %s: %s", code, repr(e)[:150])
             records.append({"code": code, "name": name,
                             "industry": industry_fallback or "-"})
+            time.sleep(config.REQUEST_SLEEP)
+            continue
+        records.append(record)
+        completed[code] = record
+        if checkpoint_path:
+            _save_checkpoint(
+                checkpoint_path,
+                [completed[item] for item in codes if item in completed],
+            )
         time.sleep(config.REQUEST_SLEEP)
     return pd.DataFrame(records)
