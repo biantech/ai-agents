@@ -54,6 +54,55 @@ python3 run_analysis.py --top 30
 
 `--top` 的优先级高于 `agent/config.py` 中的 `TOP_N`。未传入 `--top` 时，才使用 `TOP_N` 的默认值。
 
+## Top N 如何排序并写入报告
+
+程序先对全部已完成分析的股票计算复合分，再按以下步骤生成 Top N：
+
+1. 只保留结论为“优选”或“观察”的股票；“数据不足”“未创造超额回报”“估值偏高”不会进入候选池。
+2. 候选按 `composite_score` 从高到低排序。
+3. 复合分相同时，先按 `roic_wacc_spread`（ROIC-WACC）从高到低，再按 `peg_rank_value`（PEG）从低到高；缺失值排在最后。
+4. 排序完成后取前 `N` 条（`N` 由 `--top N` 或 `agent/config.py` 的 `TOP_N` 决定）。候选不足 N 条时，报告只写入实际候选数量。
+
+完整排序结果写入 `*PEG-ROIC排名_全样本.csv`，筛选后的优选池写入 `*PEG-ROIC优选池.csv`，最终 Top N 写入 `*PEG-ROIC_TopN.csv`，三者的 Markdown 汇总同时写入 `*PEG-ROIC复合分析报告.md`。报告第三节“Top N 候选”就是最终截取的记录，并保留排名、PEG、ROIC、现金流质量、负债率和复合分等字段。
+
+## 复合分如何计算
+
+复合分满分 100 分，先分别计算五项分数，再相加并四舍五入到 1 位小数：
+
+| 项目 | 满分 | 计算方式 |
+| --- | ---: | --- |
+| PEG | 40 | `min(40, 40 / max(PEG, 1))`；PEG 缺失或非正数记 0 分，PEG 越低分越高，PEG 不高于 1 时该项为 40 分 |
+| ROIC | 25 | `clip(ROIC, 0, 20) / 20 * 25`；缺失记 0 分 |
+| ROIC-WACC | 15 | `clip(ROIC - WACC, 0, 12) / 12 * 15`；WACC 默认 8%，缺失或低于 WACC 的部分记 0 分 |
+| 现金流质量 | 10 | `clip(现金流/净利润, 0, 1.2) / 1.2 * 10`；缺失记 0 分 |
+| 负债约束 | 10 | `max(0, 1 - 负债率/100) * 10`；负债率越低分越高，缺失记 0 分 |
+
+其中 `clip(x, low, high)` 表示把数值限制在上下限内。PEG 优先使用前瞻 PEG，缺失时使用历史 PEG；ROIC 需要完整的资产负债表和利润表字段，无法可靠计算时保留缺失，不做估算。
+
+## 如何调整增长和价值权重
+
+权重目前集中写在 `agent/scoring.py` 的 `evaluate()` 中，默认分配为：PEG 40、ROIC 25、ROIC-WACC 15、现金流质量 10、负债约束 10。修改后应保持总分仍为 100，并同步检查报告中的权重说明。
+
+- **增长/估值侧更重要**：提高 PEG 的 40 分上限，例如改为 PEG 50；可从现金流质量和负债约束各减少 5 分，形成 `50/25/15/5/5`。PEG 越低代表相对增长的估值越便宜，因此该调整会更明显地拉开低 PEG 股票的排名。
+- **价值/资本效率侧更重要**：提高 ROIC 与 ROIC-WACC 两项，例如改为 `PEG 30、ROIC 30、ROIC-WACC 20、现金流质量 10、负债约束 10`。这样高 ROIC、且明显高于 WACC 的股票会获得更大排序优势。
+
+调整权重后，重新运行分析即可生成新的全样本排名和 Top N；已有 CSV 若只需按原复合分重新截取，可使用 `rerank_results.py`，但它不会重新计算权重或财务数据。
+
+## 已有结果重新排序
+
+已有 Top CSV 可以直接重新排序和截取，不会重新获取或计算财务数据：
+
+```bash
+python3 rerank_results.py output/2000cons_PEG-ROIC_Top50.csv --top 30
+```
+
+默认输出为同目录下的 `2000cons_PEG-ROIC_Top30.csv`。也可以指定输出路径：
+
+```bash
+python3 rerank_results.py output/2000cons_PEG-ROIC_Top50.csv --top 20 \
+  --output output/my_top20.csv
+```
+
 ## 核心规则
 
 - PEG 优先使用券商一致预期增速，缺失时使用年度归母净利润增速。

@@ -23,7 +23,7 @@ ROIC_EXCELLENT = 20.0
 SPREAD_GOOD = 4.0
 DEBT_WARN = 60.0
 CASH_QUALITY_GOOD = 0.8
-TOP_N = 10
+TOP_N = 20
 
 
 def ensure_dirs() -> None:
