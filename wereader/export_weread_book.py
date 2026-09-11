@@ -24,7 +24,9 @@ except ImportError:  # Keep --help and the installation message available withou
     async_playwright = None
 
 
-DEFAULT_BOOK_URL = "https://weread.qq.com/web/reader/800323e07158c8e0800fd55"
+# DEFAULT_BOOK_URL = "https://weread.qq.com/web/reader/800323e07158c8e0800fd55"
+DEFAULT_BOOK_URL = "https://weread.qq.com/web/reader/fe132990813abba03g013921"
+
 READ_PATH = "/web/book/read"
 OCR_SOURCE = Path(__file__).with_name("ocr_image.swift")
 OCR_BINARY = Path(tempfile.gettempdir()) / "weread_ocr_image"
