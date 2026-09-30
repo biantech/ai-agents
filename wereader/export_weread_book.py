@@ -541,9 +541,6 @@ async def export_book(
             next_direct_text, next_text, next_canvas, next_image, next_canvas_images, next_digest = (
                 await wait_for_next_render(page, current_digest, render_wait_seconds)
             )
-            if next_canvas and not next_direct_text:
-                logger.info("Canvas has no newly drawn text after page %d; stopping.", page_number)
-                break
             if not next_text and not next_canvas:
                 logger.info("No visible reader content after page %d; stopping.", page_number)
                 break
